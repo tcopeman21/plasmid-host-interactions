@@ -114,14 +114,14 @@ def main() -> None:
     # Report missing mappings
     for p, miss in missing_report.items():
         if not miss:
-            print(f"✅ Slot {p}: all parts matched to solo table")
+            print(f"Slot {p}: all parts matched to solo table")
         else:
-            print(f"⚠️ Slot {p}: {len(miss)} parts missing in solo table")
+            print(f"Slot {p}: {len(miss)} parts missing in solo table")
 
     # Save merged table
     merged_path = out_dir / "assembly_with_solo_and_shap.csv"
     df.to_csv(merged_path, index=False)
-    print(f"✅ Wrote merged table: {merged_path}")
+    print(f"Wrote merged table: {merged_path}")
 
     # Part-level summary stats per slot
     summary_rows = []
@@ -152,7 +152,7 @@ def main() -> None:
     summary_df = pd.concat(summary_rows, ignore_index=True)
     summary_path = out_dir / "Part_SoloLFC_SHAP_stats.csv"
     summary_df.to_csv(summary_path, index=False)
-    print(f"✅ Wrote part-level summary: {summary_path}")
+    print(f"Wrote part-level summary: {summary_path}")
 
 
 if __name__ == "__main__":
