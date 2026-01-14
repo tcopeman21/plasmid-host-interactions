@@ -1,128 +1,57 @@
+#!/usr/bin/env python3
 """
 mechanism_analysis.py
 
-Combine quantitative "mechanism proxy" metrics (TX, concatemer %, TFBS burden)
-with plasmid LFC and generate:
-  - 1x3 mechanism panel figure (with Spearman rho + p-values)
-  - Spearman stats table
-  - (optional) TF class vs LFC violin-like plot and summary stats
+Combines three mechanism metrics and plot against plasmid fitness (LFC):
+  1) Spurious transcription load (tx_total)
+  2) Concatemerisation (%)
+  3) TFBS burden (total TFBS sites per plasmid)
 
-Inputs expected (you can map columns via CLI):
-  - LFC CSV: plasmid + LFC mean + LFC std
-  - TX TSV: plasmid + tx_left + tx_right (or already tx_total)
-  - concat CSV: plasmid + concat mean + concat std
-  - TFBS presence matrix CSV: plasmid + TF columns + tfbs_total (or compute from TF columns)
+Also computes Spearman correlations and optionally a TF-class effect plot.
 
-Example:
+Typical use:
   python mechanism_analysis.py \
-    --lfc /.../Plasmid_LFC_Summary_with_Sequences.csv \
-    --tx  /.../reads_out.tsv \
-    --concat /.../Concatemer_Percentage_Summary.csv \
-    --tfbs /.../TFBS_presence_matrix.csv \
-    --outdir /.../out_mech \
+    --lfc Plasmid_LFC_Summary_with_Sequences.csv \
+    --tx reads_out.tsv \
+    --concat Concatemer_Percentage_Summary.csv \
+    --tfbs FIMO_presence_matrix.csv \
+    --outdir results/mechanisms \
     --make-tf-class
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 
+# TF class mapping ---------------------
 
-# ----------------------------
-# Plot styling (centralised)
-# ----------------------------
+GLOBAL_TFS = {
+    "arcA", "crp", "fis", "fnr", "fur",
+    "hns", "ihf", "lrp", "ompR", "narL", "narP"
+}
 
-def add_lfc_bands(ax: plt.Axes) -> None:
-    ax.set_ylim(-4.25, 1.0)
-    ax.axhspan(-4.25, -3.0, facecolor="#c7c7c7", alpha=0.9, zorder=0)
-    ax.axhspan(-3.0,  -2.0, facecolor="#d8d8d8", alpha=0.8, zorder=0)
-    ax.axhspan(-2.0,  -0.5, facecolor="#e8e8e8", alpha=0.7, zorder=0)
-    ax.axhspan(-0.5,   1.0, facecolor="#ffffff", alpha=1.0, zorder=0)
+STRESS_TFS = {
+    "oxyR", "soxS", "rpoE", "rpoH2", "rpoH3",
+    "rpoN", "rpoS17", "rpoS18", "marR"
+}
 
-
-def style_axes(ax: plt.Axes, grid_linestyle: str = "--") -> None:
-    ax.grid(True, alpha=0.4, linewidth=0.5, linestyle=grid_linestyle)
-    for spine in ax.spines.values():
-        spine.set_visible(True)
-        spine.set_linewidth(1.0)
-        spine.set_color("black")
-    ax.tick_params(direction="out", length=4, width=0.8)
-
-
-def add_stats_box(ax: plt.Axes, rho: float, p: float) -> None:
-    text = f"Spearman ρ = {rho:.2f}\np = {p:.2g}"
-    ax.text(
-        0.96, 0.96,
-        text,
-        transform=ax.transAxes,
-        va="top",
-        ha="right",
-        fontsize=10,
-        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", alpha=0.4),
-        zorder=5,
-    )
-
-
-# ----------------------------
-# Data loading + validation
-# ----------------------------
-
-def _read_table(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() in [".tsv", ".txt"]:
-        return pd.read_csv(path, sep="\t")
-    return pd.read_csv(path)
-
-
-def _require_cols(df: pd.DataFrame, cols: list[str], name: str) -> None:
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise KeyError(f"{name} missing columns: {missing}\nFound: {list(df.columns)}")
-
-
-def _normalise_plasmid(df: pd.DataFrame, plasmid_col: str) -> pd.DataFrame:
-    out = df.copy()
-    out[plasmid_col] = out[plasmid_col].astype(str).str.strip()
-    return out
-
-
-def compute_tfbs_total(tfbs_df: pd.DataFrame, plasmid_col: str) -> pd.DataFrame:
-    """
-    Accepts either:
-      - tfbs_total already present, OR
-      - wide TF columns that need summing.
-    """
-    df = tfbs_df.copy()
-    _require_cols(df, [plasmid_col], "TFBS table")
-
-    if "tfbs_total" not in df.columns:
-        tf_cols = [c for c in df.columns if c != plasmid_col]
-        if not tf_cols:
-            raise ValueError("TFBS table has no TF columns and no tfbs_total.")
-        df[tf_cols] = df[tf_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        df["tfbs_total"] = df[tf_cols].sum(axis=1)
-
-    return df[[plasmid_col, "tfbs_total"]]
-
-
-# ----------------------------
-# TF class mapping (optional)
-# ----------------------------
-
-GLOBAL_TFS = {"arcA", "crp", "fis", "fnr", "fur", "hns", "ihf", "lrp", "ompR", "narL", "narP"}
-STRESS_TFS = {"oxyR", "soxS", "rpoE", "rpoH2", "rpoH3", "rpoN", "rpoS17", "rpoS18", "marR"}
 SIGMA70_TFS = {"rpoD15", "rpoD16", "rpoD17", "rpoD18", "rpoD19"}
+
 TWO_COMPONENT_TFS = {"cpxR", "phoB", "phoB3", "torR", "ntrC", "narL", "narP", "ompR"}
+
 METABOLIC_TFS = {
-    "araC", "argR", "argR2", "cysB", "cytR", "deoR", "fadR", "fruR", "galR", "gcvA",
-    "glpR", "iclR", "ilvY", "lacI", "malT", "metJ", "metJ3", "metR", "modE", "nagC",
-    "pdhR", "purR", "rhaS", "trpR", "tyrR", "cynR"
+    "araC", "argR", "argR2", "cysB", "cytR", "deoR",
+    "fadR", "fruR", "galR", "gcvA", "glpR", "iclR",
+    "ilvY", "lacI", "malT", "metJ", "metJ3", "metR",
+    "modE", "nagC", "pdhR", "purR", "rhaS", "trpR",
+    "tyrR", "cynR"
 }
 
 TF_CLASS_ORDER = [
@@ -136,7 +65,6 @@ TF_CLASS_ORDER = [
 
 
 def classify_tf(tf: str) -> str:
-    tf = str(tf).strip()
     if tf in GLOBAL_TFS:
         return "Global"
     if tf in STRESS_TFS:
@@ -149,10 +77,80 @@ def classify_tf(tf: str) -> str:
         return "Two-component"
     return "Pathway-specific"
 
+# IO + validation helpers-------------------
 
-# ----------------------------
-# Plotting functions
-# ----------------------------
+def _read_table(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Input file not found: {path}")
+    # TSV for tx; otherwise csv
+    if path.suffix.lower() in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\t")
+    return pd.read_csv(path)
+
+
+def _require_cols(df: pd.DataFrame, cols: list[str], name: str) -> None:
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"{name} missing required columns: {missing}\nAvailable: {list(df.columns)}")
+
+
+def _normalise_plasmid(df: pd.DataFrame, plasmid_col: str) -> pd.DataFrame:
+    """Strip whitespace; enforce string key for robust joins."""
+    out = df.copy()
+    out[plasmid_col] = out[plasmid_col].astype(str).str.strip()
+    return out
+
+def compute_tfbs_total(tfbs_matrix: pd.DataFrame, plasmid_col: str = "plasmid") -> pd.DataFrame:
+    """
+    From a presence matrix (plasmid + TF columns), compute:
+      - tfbs_total
+      - n_unique_tfs
+    """
+    _require_cols(tfbs_matrix, [plasmid_col], "TFBS matrix")
+    tf_cols = [c for c in tfbs_matrix.columns if c != plasmid_col]
+    if not tf_cols:
+        raise ValueError("TFBS matrix has no TF columns (only plasmid column?).")
+
+    df = tfbs_matrix.copy()
+    df[tf_cols] = df[tf_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    out = df[[plasmid_col]].copy()
+    out["tfbs_total"] = df[tf_cols].sum(axis=1)
+    out["n_unique_tfs"] = (df[tf_cols] > 0).sum(axis=1)
+    return out
+
+# Plot style helpers-------------------
+
+def add_lfc_bands(ax: plt.Axes) -> None:
+    ax.set_ylim(-4.25, 1.0)
+    ax.axhspan(-4.25, -3.0, facecolor="#c7c7c7", alpha=0.9, zorder=0)
+    ax.axhspan(-3.0, -2.0, facecolor="#d8d8d8", alpha=0.8, zorder=0)
+    ax.axhspan(-2.0, -0.5, facecolor="#e8e8e8", alpha=0.7, zorder=0)
+    ax.axhspan(-0.5, 1.0, facecolor="#ffffff", alpha=1.0, zorder=0)
+
+
+def style_axes(ax: plt.Axes, grid_linestyle: str = "--") -> None:
+    ax.grid(True, alpha=0.4, linewidth=0.5, linestyle=grid_linestyle)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(1.0)
+        spine.set_color("black")
+    ax.tick_params(direction="out", length=4, width=0.8)
+
+
+def add_stats_box(ax: plt.Axes, rho: float, p: float) -> None:
+    txt = f"Spearman ρ = {rho:.2f}\np = {p:.2g}"
+    ax.text(
+        0.96, 0.96,
+        txt,
+        transform=ax.transAxes,
+        va="top",
+        ha="right",
+        fontsize=10,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="black", alpha=0.4),
+    )
+
+# Main plots --------------------
 
 def plot_mechanism_panel(
     df_tx: pd.DataFrame,
@@ -164,23 +162,21 @@ def plot_mechanism_panel(
     out_pdf: Path,
 ) -> pd.DataFrame:
     """
-    Creates the 1x3 panel and returns a stats dataframe.
+    Make the 1×3 panel and return Spearman stats table.
     """
-    # Spearman
+    marker_color = "#4A90E2"
+    marker_edge = "#1f3b4d"
+
+    # Spearman stats
     rho_tx, p_tx = spearmanr(df_tx["tx_total"], df_tx[lfc_mean_col])
     rho_concat, p_concat = spearmanr(df_concat["concat_mean"], df_concat[lfc_mean_col])
     rho_tfbs, p_tfbs = spearmanr(df_tfbs["tfbs_total"], df_tfbs[lfc_mean_col])
 
-    stats = pd.DataFrame(
-        [
-            {"panel": "Spurious transcription", "metric": "tx_total", "spearman_rho": rho_tx, "p_value": p_tx, "n": len(df_tx)},
-            {"panel": "Concatemers", "metric": "concat_mean", "spearman_rho": rho_concat, "p_value": p_concat, "n": len(df_concat)},
-            {"panel": "TFBS burden", "metric": "tfbs_total", "spearman_rho": rho_tfbs, "p_value": p_tfbs, "n": len(df_tfbs)},
-        ]
-    )
-
-    marker_color = "#4A90E2"
-    marker_edge = "#1f3b4d"
+    stats = pd.DataFrame([
+        {"metric": "tx_total", "spearman_rho": rho_tx, "p_value": p_tx, "n": len(df_tx)},
+        {"metric": "concat_mean", "spearman_rho": rho_concat, "p_value": p_concat, "n": len(df_concat)},
+        {"metric": "tfbs_total", "spearman_rho": rho_tfbs, "p_value": p_tfbs, "n": len(df_tfbs)},
+    ])
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 5), dpi=300, sharey=True)
 
@@ -210,7 +206,7 @@ def plot_mechanism_panel(
     style_axes(ax)
     add_stats_box(ax, rho_tx, p_tx)
 
-    # Panel 2: Concat
+    # Panel 2: concat
     ax = axes[1]
     add_lfc_bands(ax)
     ax.errorbar(
@@ -262,6 +258,7 @@ def plot_mechanism_panel(
     add_stats_box(ax, rho_tfbs, p_tfbs)
 
     plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
@@ -278,23 +275,19 @@ def plot_tf_class_effect(
     out_pdf: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Produces a TF-class vs LFC plot using matplotlib (no seaborn dependency).
-    We expand plasmid–TF pairs where TF count > 0, then plot distributions per class.
-
+    Expand plasmid–TF pairs where TF count > 0, assign TF classes, and plot box+points per class.
     Returns:
-      long_df (expanded)
-      summary_stats (per class)
+      - long_df
+      - summary_stats
     """
     _require_cols(tfbs_matrix, [plasmid_col], "TFBS matrix")
     _require_cols(lfc, [plasmid_col, lfc_mean_col], "LFC table")
 
     df = tfbs_matrix.merge(lfc[[plasmid_col, lfc_mean_col]], on=plasmid_col, how="inner").copy()
-
     tf_cols = [c for c in df.columns if c not in {plasmid_col, lfc_mean_col, "tfbs_total", "n_unique_tfs"}]
     if not tf_cols:
-        raise ValueError("No TF columns found for TF-class analysis (matrix looks like totals-only).")
+        raise ValueError("No TF columns found for TF-class analysis (matrix looks totals-only).")
 
-    # Wide -> long, keep nonzero
     long = df.melt(
         id_vars=[plasmid_col, lfc_mean_col],
         value_vars=tf_cols,
@@ -305,7 +298,6 @@ def plot_tf_class_effect(
     long = long[long["count"] > 0].copy()
     long["TF_class"] = long["TF"].apply(classify_tf)
 
-    # Summary
     summary = (
         long.groupby("TF_class")[lfc_mean_col]
             .agg(count="count", mean="mean", std="std", median="median")
@@ -313,11 +305,9 @@ def plot_tf_class_effect(
             .reset_index()
     )
 
-    # Plot (simple box + jitter points)
     fig, ax = plt.subplots(figsize=(7, 5), dpi=300)
     add_lfc_bands(ax)
 
-    # Prepare data per class
     data = [long.loc[long["TF_class"] == c, lfc_mean_col].values for c in TF_CLASS_ORDER]
     positions = np.arange(len(TF_CLASS_ORDER))
 
@@ -333,7 +323,6 @@ def plot_tf_class_effect(
         capprops=dict(color="black"),
     )
 
-    # Jitter points
     rng = np.random.default_rng(0)  # deterministic jitter
     for i, c in enumerate(TF_CLASS_ORDER):
         y = long.loc[long["TF_class"] == c, lfc_mean_col].values
@@ -348,16 +337,14 @@ def plot_tf_class_effect(
     style_axes(ax, grid_linestyle="-")
 
     plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
 
     return long, summary
 
-
-# ----------------------------
-# CLI
-# ----------------------------
+# CLI ------------
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Mechanism proxy analysis + plotting.")
@@ -366,12 +353,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--concat", required=True, type=Path, help="Concatemer summary CSV path.")
     p.add_argument("--tfbs", required=True, type=Path, help="TFBS presence matrix CSV path.")
     p.add_argument("--outdir", required=True, type=Path, help="Output directory.")
-
-    # Column mapping
-    p.add_argument("--plasmid-col-lfc", default="plasmid", help="Plasmid column name in LFC file (after renaming).")
-    p.add_argument("--plasmid-col-tx", default="plasmid", help="Plasmid column name in TX file.")
-    p.add_argument("--plasmid-col-concat", default="plasmid", help="Plasmid column name in concat file.")
-    p.add_argument("--plasmid-col-tfbs", default="plasmid", help="Plasmid column name in TFBS matrix.")
 
     p.add_argument("--lfc-mean-col", default="Average_LFC_DH5a", help="Mean LFC column.")
     p.add_argument("--lfc-std-col", default="LFC_StdDev_DH5a", help="LFC std column.")
@@ -383,7 +364,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--concat-mean-col", default="Average_End_Concatemer_%", help="Concatemer mean column.")
     p.add_argument("--concat-std-col", default="Std_End_Concatemer_%", help="Concatemer std column.")
 
-    p.add_argument("--make-tf-class", action="store_true", help="Also generate TF-class vs LFC plot + summary.")
+    p.add_argument("--plasmid-col-lfc", default="plasmid", help="Plasmid column name in LFC table.")
+    p.add_argument("--plasmid-col-tx", default="plasmid", help="Plasmid column name in TX table.")
+    p.add_argument("--plasmid-col-concat", default="plasmid", help="Plasmid column name in concat table.")
+    p.add_argument("--plasmid-col-tfbs", default="plasmid", help="Plasmid column name in TFBS matrix.")
+
+    p.add_argument("--make-tf-class", action="store_true", help="Also generate TF-class plot + summary.")
     p.add_argument("--prefix", type=str, default="mechanisms", help="Prefix for output filenames.")
     return p.parse_args(argv)
 
@@ -392,25 +378,24 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     args.outdir.mkdir(parents=True, exist_ok=True)
 
-    # Load
     lfc = _read_table(args.lfc)
     tx = _read_table(args.tx)
     concat = _read_table(args.concat)
     tfbs = _read_table(args.tfbs)
 
-    # Normalise plasmid keys + rename if your LFC file uses "Plasmid"
-    # (Reviewer-friendly: explicit, not magic.)
+    # Reviewer-friendly explicit renaming (common in your files)
     if "Plasmid" in lfc.columns and args.plasmid_col_lfc == "plasmid":
         lfc = lfc.rename(columns={"Plasmid": "plasmid"})
     if "Plasmid" in tfbs.columns and args.plasmid_col_tfbs == "plasmid":
         tfbs = tfbs.rename(columns={"Plasmid": "plasmid"})
+    if "region" in concat.columns and args.plasmid_col_concat == "plasmid":
+        concat = concat.rename(columns={"region": "plasmid"})
 
     lfc = _normalise_plasmid(lfc, args.plasmid_col_lfc)
     tx = _normalise_plasmid(tx, args.plasmid_col_tx)
     concat = _normalise_plasmid(concat, args.plasmid_col_concat)
     tfbs = _normalise_plasmid(tfbs, args.plasmid_col_tfbs)
 
-    # Validate key columns
     _require_cols(lfc, [args.plasmid_col_lfc, args.lfc_mean_col, args.lfc_std_col], "LFC table")
     _require_cols(concat, [args.plasmid_col_concat, args.concat_mean_col, args.concat_std_col], "Concat table")
 
@@ -443,12 +428,10 @@ def main(argv: list[str]) -> int:
         columns={args.plasmid_col_tfbs: "plasmid"}
     )
 
-    # Merge into panel DFs
     df_tx = lfc_keyed.merge(tx_total, on="plasmid", how="inner")
     df_concat = lfc_keyed.merge(concat_tidy, on="plasmid", how="inner")
     df_tfbs = lfc_keyed.merge(tfbs_total, on="plasmid", how="inner")
 
-    # Output 1x3 panel
     fig_png = args.outdir / f"{args.prefix}_figure_mechanisms_1x3.png"
     fig_pdf = args.outdir / f"{args.prefix}_figure_mechanisms_1x3.pdf"
     stats = plot_mechanism_panel(
@@ -468,21 +451,18 @@ def main(argv: list[str]) -> int:
     print(f"[OK] Wrote: {fig_pdf}")
     print(f"[OK] Wrote: {stats_path}")
 
-    # Optional TF-class plot
     if args.make_tf_class:
+        # Ensure plasmid column is literally "plasmid" for class plot
         tfbs_matrix = tfbs.copy()
         if args.plasmid_col_tfbs != "plasmid":
             tfbs_matrix = tfbs_matrix.rename(columns={args.plasmid_col_tfbs: "plasmid"})
-        if "plasmid" not in tfbs_matrix.columns:
-            raise KeyError("TFBS matrix must have a plasmid column after renaming.")
-
         lfc_for_class = lfc_keyed[["plasmid", args.lfc_mean_col]].copy()
 
-        tfclass_png = args.outdir / f"{args.prefix}_figure_tf_class_violin.png"
-        tfclass_pdf = args.outdir / f"{args.prefix}_figure_tf_class_violin.pdf"
+        tfclass_png = args.outdir / f"{args.prefix}_figure_tf_class.png"
+        tfclass_pdf = args.outdir / f"{args.prefix}_figure_tf_class.pdf"
         long_df, summary = plot_tf_class_effect(
             tfbs_matrix=tfbs_matrix,
-            lfc=lfc_for_class.rename(columns={"plasmid": "plasmid"}),
+            lfc=lfc_for_class,
             plasmid_col="plasmid",
             lfc_mean_col=args.lfc_mean_col,
             out_png=tfclass_png,
