@@ -13,7 +13,7 @@ The repo is organised around four main components:
 3. **Predictive models (`models/`)**  
    Random forest, pairwise/ranking, and unet models.
 4. **TRACE (`TRACE/`)**  
-   Sliding-window application of sequence-trained models to full plasmids + aggregation + validation.
+   Sliding-window application of sequence-trained models to full plasmids + aggregation + finetuning + validation.
 
 ---
 
