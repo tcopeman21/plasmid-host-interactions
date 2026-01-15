@@ -11,7 +11,7 @@ The repo is organised around four main components:
 2. **Mechanistic analysis (`Pipeline/analysis/`)**  
    Scripts that combine metrics with fitness and generate publication figures.
 3. **Predictive models (`models/`)**  
-   Random forest, pairwise/ranking, and other non-TRACE models used in the paper.
+   Random forest, pairwise/ranking, and unet models.
 4. **TRACE (`TRACE/`)**  
    Sliding-window application of sequence-trained models to full plasmids + aggregation + validation.
 
